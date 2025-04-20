@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Breathing Rhythm Mini‑Game</title>
+<style>
+    html,body{margin:0;height:100%;background:#111;font-family:sans-serif;color:#fff;}
+    #gameCanvas{display:block;margin:auto;background:#222;}
+    #ui{position:fixed;top:8px;left:50%;transform:translateX(-50%);
+        display:flex;gap:24px;font-size:14px;z-index:10;}
+    .meter{min-width:160px;height:18px;background:#333;border:1px solid #555;position:relative;}
+    .fill{position:absolute;inset:0 0 0 0;height:100%;background:#4caf50;}
+
+    #instruction{
+        position:fixed;top:40px;left:50%;transform:translateX(-50%);
+        font-size:18px;text-align:center;color:#bbb;z-index:10;
+    }
+    /* overlay */
+    #overlay{position:fixed;inset:0;background:#000c;display:flex;
+        flex-direction:column;justify-content:center;align-items:center;
+        font-size:48px;font-weight:bold;visibility:hidden;z-index:20;}
+    #overlay button{margin-top:24px;padding:8px 16px;font-size:18px;cursor:pointer;
+        border:none;background:#4caf50;color:#fff;border-radius:6px;}
+
+    .win-heading {font-size:48px;font-weight:bold;margin-bottom:4px;}
+    .win-sub     {font-size:18px;color:#ccc;margin-bottom:16px;text-align:center;}
+    .insight-card{
+        background:#333;padding:16px 24px;border-radius:8px;font-size:16px;
+        max-width:500px;text-align:center;color:#fff;
+    }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas" width="800" height="600"></canvas>
+
+<div id="ui">
+    <div>Score: <span id="score">0</span></div>
+    <div>Breaths/min: <span id="bpm">35</span></div>
+    <div>Misses: <span id="misses">0</span>/5</div>
+    <div class="meter"><div id="calmMeter" class="fill" style="width:0%"></div></div>
+</div>
+
+<div id="instruction">Hit the notes perfectly to calm down and breathe slowly</div>
+
+<div id="overlay">
+    <div id="overlayText">YOU WON!</div>
+    <button id="restartBtn">Restart</button>
+</div>
+
+<script>
+/* ===== CONFIG (25‑second round) ===== */
+const canvas = document.getElementById('gameCanvas');
+const ctx    = canvas.getContext('2d');
+const handImg = new Image();
+handImg.src = 'hand.png';
+
+const BPM_START      = 45;      // busy start
+const BPM_END        = 7;
+const WIN_BPM        = 8;
+const LEVEL_TIME     = 30_000;  // 30‑second mini‑game
+const NOTE_SIZE      = 20;
+const HIT_ZONE_Y     = canvas.height - 120;
+const HIT_WINDOW     = 40;
+const MAX_MISSES     = 3;
+const START_JITTER   = 6;       // stronger shake
+const END_JITTER     = 0.25;    // almost still
+
+/* ----- Insight pool (5 items) ----- */
+const INSIGHTS = [
+    "Slow diaphragmatic breathing switches your body from 'fight‑or‑flight' to 'rest‑and‑digest', lowering heart‑rate and blood pressure.",
+    "Counting the breath (4‑in / 6‑out) boosts vagal tone—your nervous system's built‑in calm button.",
+    "Rhythmic breathing reduces cortisol, the primary stress hormone, within minutes.",
+    "Focusing on breath gives your brain a task; this crowds out spiralling anxious thoughts.",
+    "Even 60 seconds of paced breathing can improve heart‑rate variability, a key marker of resilience."
+];
+
+/* ===== STATE ===== */
+let bpm, elapsed, nextNote, score, misses, notes, hits, gameDone, last;
+let breathPhase = 0;            // 0‑to‑2π phase for breathing circle
+
+/* ===== DOM ===== */
+const scoreEl  = document.getElementById('score');
+const bpmEl    = document.getElementById('bpm');
+const missEl   = document.getElementById('misses');
+const calmBar  = document.getElementById('calmMeter');
+const overlay  = document.getElementById('overlay');
+const overlayText = document.getElementById('overlayText');
+document.getElementById('restartBtn').onclick = initGame;
+
+/* ===== INITIALISE ===== */
+initGame();
+function initGame(){
+    bpm = BPM_START;
+    elapsed = 0;
+    nextNote = 0;
+    score = 0;
+    misses = 0;
+    notes = [];
+    hits  = [];          // {x,y,alpha}
+    gameDone = false;
+    last = performance.now();
+    breathPhase = 0;
+
+    scoreEl.textContent = 0;
+    bpmEl.textContent   = BPM_START;
+    missEl.textContent  = '0';
+    calmBar.style.width = '0%';
+    overlay.style.visibility = 'hidden';
+
+    requestAnimationFrame(gameLoop);
+}
+
+/* ===== HELPERS ===== */
+const lerp = (a,b,t)=>a+(b-a)*t;
+function spawnNote(){
+    const x = canvas.width/2 + (Math.random()*120 - 60);
+    notes.push({x,y:-NOTE_SIZE});
+}
+
+/* ===== MAIN LOOP ===== */
+function gameLoop(now){
+    const dt = now - last; last = now;
+    if(gameDone) return;
+
+    updateBreathing(dt);
+    updateNotes(dt);
+    updateHits(dt);
+    draw();
+
+    requestAnimationFrame(gameLoop);
+}
+
+/* ===== UPDATE ===== */
+function updateBreathing(dt){
+    elapsed += dt;
+    const t = Math.min(elapsed/LEVEL_TIME,1);
+    bpm = lerp(BPM_START, BPM_END, t);
+
+    const msPerBreath = 60_000 / bpm;
+    nextNote -= dt;
+    if(nextNote <= 0){
+        spawnNote();
+        nextNote += msPerBreath/2;
+    }
+
+    // advance breathing phase for circle (full cycle per breath)
+    breathPhase += (dt / msPerBreath) * 2*Math.PI;
+    if(breathPhase > 2*Math.PI) breathPhase -= 2*Math.PI;
+
+    calmBar.style.width = `${t*100}%`;
+    bpmEl.textContent = bpm.toFixed(0);
+
+    if(bpm <= WIN_BPM) endGame(true);
+}
+
+function updateNotes(dt){
+    const speed = 180 * (bpm/BPM_START);
+    notes.forEach(n=>n.y += speed * dt/1000);
+
+    for(let i=notes.length-1;i>=0;i--){
+        if(notes[i].y > canvas.height + NOTE_SIZE){
+            notes.splice(i,1);
+            registerMiss();
+        }
+    }
+}
+
+function updateHits(dt){
+    // fade hit flashes
+    for(let i=hits.length-1;i>=0;i--){
+        hits[i].alpha -= dt/400;              // fade in 0.4 s
+        if(hits[i].alpha<=0) hits.splice(i,1);
+    }
+}
+
+/* ===== INPUT ===== */
+canvas.addEventListener('click',(e)=>{
+    if(gameDone) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    let hit=false;
+    for(let i=notes.length-1;i>=0;i--){
+        const n = notes[i];
+        if(Math.abs(n.y - HIT_ZONE_Y) <= HIT_WINDOW &&
+           Math.abs(n.x - mx) < NOTE_SIZE){
+            notes.splice(i,1);
+            score += 10; scoreEl.textContent = score;
+            hits.push({x:n.x,y:n.y,alpha:1});  // add flash
+            hit=true; break;
+        }
+    }
+    if(!hit) registerMiss();
+});
+
+function registerMiss(){
+    misses++; missEl.textContent = `${misses}`;
+    if(misses>=MAX_MISSES) endGame(false);
+}
+
+/* ===== END GAME ===== */
+function endGame(won){
+    gameDone = true;
+
+    /* build overlay content */
+    let html = '';
+    if (won){
+        const insight = INSIGHTS[Math.floor(Math.random() * INSIGHTS.length)];
+        html = `
+            <div class="win-heading">You Won!</div>
+            <div class="win-sub">Congratulations, you have successfully calmed yourself down.</div>
+            <div class="insight-card">${insight}</div>
+            <button id="restartBtn">Restart</button>
+        `;
+    } else {
+        html = `
+            <div class="win-heading">Game Over</div>
+            <div class="win-sub">Try again to improve your timing and breathing.</div>
+            <button id="restartBtn">Restart</button>
+        `;
+    }
+
+    overlay.innerHTML = html;
+    document.getElementById('restartBtn').onclick = initGame;
+    overlay.style.visibility = 'visible';
+}
+
+/* ===== DRAW ===== */
+function draw(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    /* Breathing circle with gradient */
+    const base    = 180;                // mean radius
+    const amp     = 40;                 // expansion amount
+    const radius  = base + Math.sin(breathPhase)*amp;
+
+    // hue oscillates between 180° (cyan) and 230° (blue)
+    const hue = 180 + 50*((Math.sin(breathPhase)+1)/2);
+    const inner = `hsla(${hue},70%,40%,0.35)`;
+    const outer = `hsla(${hue},70%,15%,0.35)`;
+
+    const grad = ctx.createRadialGradient(
+        canvas.width/2, canvas.height/2, 0,
+        canvas.width/2, canvas.height/2, radius);
+    grad.addColorStop(0, inner);
+    grad.addColorStop(1, outer);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(canvas.width/2, canvas.height/2, radius, 0, 2*Math.PI);
+    ctx.fill();
+
+    /* Hand with stronger -> almost zero jitter */
+    const t = Math.min(elapsed/LEVEL_TIME,1);
+    const ease = t*t;                      // quadratic easing
+    const jitter = lerp(START_JITTER, END_JITTER, ease);
+    const handX = canvas.width/2 + (Math.random()*2-1)*jitter;
+    const handY = canvas.height/2 + (Math.random()*2-1)*jitter;
+
+    if (handImg.complete) {                               // image already loaded
+        const handScale = 0.5;                            // 80% of native size
+        const w = handImg.width  * handScale;
+        const h = handImg.height * handScale;
+        ctx.drawImage(handImg, handX - w/2, handY - h/2, w, h);
+    } else {
+        // fallback placeholder while loading
+        ctx.fillStyle='#555';
+        ctx.fillRect(handX-120,handY-80,240,160);
+        ctx.fillStyle='#fff';
+        ctx.font='20px sans-serif'; ctx.textAlign='center';
+        ctx.fillText('HAND (shaking)', handX, handY+8);
+    }
+
+    /* Hit zone */
+    ctx.strokeStyle='#4caf50'; ctx.lineWidth=2;
+    ctx.strokeRect(0,HIT_ZONE_Y-HIT_WINDOW,canvas.width,HIT_WINDOW*2);
+    ctx.fillStyle='#4caf50'; ctx.font='16px sans-serif'; ctx.textAlign='left';
+    ctx.fillText('CLICK WHEN NOTE ENTERS ZONE',10,HIT_ZONE_Y-HIT_WINDOW-6);
+
+    /* Notes */
+    notes.forEach(n=>{
+        ctx.fillStyle='#ffeb3b';
+        ctx.fillRect(n.x-NOTE_SIZE/2,n.y-NOTE_SIZE/2,NOTE_SIZE,NOTE_SIZE);
+        ctx.fillStyle='#000'; ctx.font='12px sans-serif'; ctx.textAlign='center';
+        ctx.fillText('♪',n.x,n.y+4);
+    });
+
+    /* Hit flashes */
+    hits.forEach(h=>{
+        ctx.fillStyle=`rgba(255,255,255,${h.alpha})`;
+        ctx.beginPath();
+        ctx.arc(h.x, h.y, NOTE_SIZE*0.6, 0, 2*Math.PI);
+        ctx.fill();
+    });
+}
+</script>
+</body>
+</html>
